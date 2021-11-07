@@ -2,11 +2,13 @@
 # -*- utf-8 -*-
 # !/usr/bin/env python
 
-import carla
 import random
 import pygame
 import numpy as np
 import queue
+import argparse
+
+from utils.util import *
 
 
 class CarlaSyncMode(object):
@@ -79,54 +81,6 @@ def should_quit():
                 return True
     return False
 
-from utils.test_pid import PID
-import math
-import pandas as pd
-
-
-def get_throttle(speed, max_speed):
-    # pid = s3.PID(0.10,0.0001,1.3)
-    pid = PID(0.2, 0.0012, 10)
-    # pid_speed = PID(0.1, 0.00012, 1.3)
-    pid.update_speed_error(speed, max_speed)
-    throttle = pid.total_error()
-    # print('throttle[{}] speed[{}]'.format(throttle, speed))
-    if throttle > 1.0:
-        throttle = 1.0
-    else:
-        throttle = throttle - 0.1
-
-    return throttle / 10
-
-
-def get_speed(vehicle):
-    v = vehicle.get_velocity()
-    return (3.6 * math.sqrt(v.x ** 2 + v.y ** 2 + v.z ** 2))
-
-
-def get_radian(x, y, x2, y2):
-    radian = math.atan2(y2 - y, x2 - x)
-    return radian
-
-
-def draw_waypoint_union(debug, w0, color=carla.Color(255, 0, 0), lt=0):
-    debug.draw_point(w0, 0.5, color, lt, False)
-
-
-def get_k(x, y):
-    return (2 * x) / ((x ** 2) + (y ** 2))
-
-
-def get_steer(wb, k, v):
-    w = v * k
-    s = (wb * w) / v
-    # print(s)
-    if s > -1 and s < 1:
-        steer = math.asin(s)
-    else:
-        steer = 0
-    return steer
-
 
 def get_waypoints_from_distance(debug, map, vehicle_location, distance):
     wps = []
@@ -154,7 +108,79 @@ def transform_waypoints_to_axsis(waypoints):
     return (X, Y)
 
 
+def parse_arg():
+    argparser = argparse.ArgumentParser(
+        description='CARLA Manual Control Client')
+    argparser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        dest='debug',
+        help='print debug information')
+    argparser.add_argument(
+        '--host',
+        metavar='H',
+        default='127.0.0.1',
+        help='IP of the host server (default: 127.0.0.1)')
+    argparser.add_argument(
+        '-p', '--port',
+        metavar='P',
+        default=2000,
+        type=int,
+        help='TCP port to listen to (default: 2000)')
+    argparser.add_argument(
+        '-a', '--autopilot',
+        action='store_true',
+        help='enable autopilot')
+    argparser.add_argument(
+        '--res',
+        metavar='WIDTHxHEIGHT',
+        default='1280x720',
+        help='window resolution (default: 1280x720)')
+    argparser.add_argument(
+        '--filter',
+        metavar='PATTERN',
+        default='vehicle.*',
+        help='actor filter (default: "vehicle.*")')
+    argparser.add_argument(
+        '--generation',
+        metavar='G',
+        default='2',
+        help='restrict to certain actor generation (values: "1","2","All" - default: "2")')
+    argparser.add_argument(
+        '--rolename',
+        metavar='NAME',
+        default='hero',
+        help='actor role name (default: "hero")')
+    argparser.add_argument(
+        '--gamma',
+        default=2.2,
+        type=float,
+        help='Gamma correction of the camera (default: 2.2)')
+    argparser.add_argument(
+        '--sync',
+        action='store_true',
+        help='Activate synchronous mode execution')
+    argparser.add_argument(
+        '--town',
+        default="Town01",
+        help='Town Name (default:Town01)'
+    )
+    argparser.add_argument(
+        '--speed',
+        type=int,
+        default=20,
+        help='Town Name (default:Town01)'
+    )
+    args = argparser.parse_args()
+
+    args.width, args.height = [int(x) for x in args.res.split('x')]
+
+    return args
+
+
 def main():
+    args = parse_arg()
+
     actor_list = []
     pygame.init()
 
@@ -164,16 +190,16 @@ def main():
     font = get_font()
     clock = pygame.time.Clock()
 
-    client = carla.Client('localhost', 2000)
+    client = carla.Client(args.host, args.port)
     client.set_timeout(60.0)
 
-    world = client.load_world('Town01')
+    world = client.load_world(args.town)
     # world = client.get_world()
 
     try:
-        m = world.get_map()
-        start_pose = random.choice(m.get_spawn_points())
-        waypoint = m.get_waypoint(start_pose.location, lane_type=(carla.LaneType.Driving))
+        map = world.get_map()
+        start_pose = random.choice(map.get_spawn_points())
+        waypoint = map.get_waypoint(start_pose.location, lane_type=(carla.LaneType.Driving))
 
         blueprint_library = world.get_blueprint_library()
 
@@ -229,7 +255,7 @@ def main():
                 print("取得したWaypointの数 {} 距離 {} 式 {}".format(len(waypoints[0]), waypoints[1], param))
 
                 # steer = angle
-                speed = get_speed(vehicle)
+                speed = get_vector3d2speed(vehicle)
 
                 X = next_waypoint.transform.location.x - vehicle.get_location().x
                 Y = next_waypoint.transform.location.y - vehicle.get_location().y
@@ -245,7 +271,7 @@ def main():
                 except ZeroDivisionError:
                     print('操舵角 {} 曲率 {} 曲率半径 {} 時速 {}'.format(steer, param[0], np.nan, speed))
 
-                throttle = get_throttle(speed, 100.0)
+                throttle = get_throttle(speed, args.speed)
                 control = vehicle.get_control()
                 if throttle > 0.0:
                     control.throttle = min(control.throttle + throttle, 1)
@@ -257,16 +283,7 @@ def main():
                 control.gear = 1
                 vehicle.apply_control(control)
 
-                # print('Next Point : {}'.format(X))
-                # next_waypoint = random.choice(next_waypoint.next(1.0))
-                # draw_waypoint_union(debug, next_waypoint.transform.location, lt=1)
-                # else:
-                #    print('Next!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-
                 next_p.append(next_waypoint)
-
-                # print("throttle {} steer {} brake = {} hand_brake {}  reverse {} manual_gear_shift {}  gear {}".format(control.throttle, control.steer, control.brake, control.hand_brake, control.reverse, control.manual_gear_shift, control.gear))
-                # print("speed = {} throtle = {}".format(speed, throttle))
 
                 image_semseg.convert(carla.ColorConverter.CityScapesPalette)
                 fps = round(1.0 / snapshot.timestamp.delta_seconds)
